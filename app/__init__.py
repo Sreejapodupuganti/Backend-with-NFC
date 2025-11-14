@@ -2,7 +2,7 @@ import os
 from flask import Flask
 from flask_cors import CORS
 from .config import Config
-from .extensions import db, migrate, bcrypt, cors
+from .extensions import db, migrate, bcrypt
 from .routes.auth_routes import auth_bp
 from .routes.card_routes import card_bp
 from .routes.admin_routes import admin_bp
@@ -11,18 +11,24 @@ from .routes.analytics_routes import analytics_bp
 from .routes.wallet_routes import wallet_bp
 from .routes.main_routes import main_bp
 
-def create_app(config_class: type= Config):
+def create_app(config_class: type = Config):
     app = Flask(__name__)
-    CORS(app)
+
+    # Correct CORS for Azure Frontend
+    CORS(app, resources={r"/*": {"origins": [
+        "https://frontendnfc-bzdxewfrhvbketgx.centralus-01.azurewebsites.net"
+    ]}})
+
     app.config.from_object(config_class)
 
     db.init_app(app)
     migrate.init_app(app, db)
     bcrypt.init_app(app)
-    cors().init_app(app)
 
-    # Register all blueprints
-    app.register_blueprint(main_bp)  # <-- Register the root route here
+    # Removed cors().init_app(app)
+
+    # Register blueprints
+    app.register_blueprint(main_bp)
     app.register_blueprint(auth_bp, url_prefix='/api/auth')
     app.register_blueprint(card_bp, url_prefix='/api/card')
     app.register_blueprint(admin_bp, url_prefix='/api/admin')
@@ -37,8 +43,6 @@ def create_app(config_class: type= Config):
 
     @app.get("/health")
     def health():
-        return {"status":"ok"}
+        return {"status": "ok"}
 
     return app
-
-
