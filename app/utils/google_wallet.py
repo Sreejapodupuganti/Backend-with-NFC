@@ -2,94 +2,133 @@ import jwt
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
 import datetime
-# CONFIG
-SERVICE_ACCOUNT_FILE = "app/config/serviceAccount.json"
+import os
+import json
+
+# ---------------------------
+# SERVICE ACCOUNT CREDENTIALS
+# ---------------------------
+
 SCOPES = ["https://www.googleapis.com/auth/wallet_object.issuer"]
 
-# Load credentials
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES
-)
+# Load JSON string from Azure App Settings
+service_json = os.getenv("GOOGLE_SERVICE_JSON")
+
+if not service_json:
+    raise Exception(
+        "GOOGLE_SERVICE_JSON is missing. Add it in Azure → Configuration → Application Settings."
+    )
+
+# Parse JSON string to dictionary
+try:
+    info = json.loads(service_json)
+    credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+except Exception as e:
+    raise Exception("Failed to load Google Wallet service account JSON.") from e
+
+# Authorized session for Google Wallet API
 authed_session = AuthorizedSession(credentials)
 
-# Replace with your Issuer ID from Google Pay & Wallet Console
-ISSUER_ID = "3388000000022985644"  # <-- CHANGE THIS
+# Your Issuer ID from Google Wallet Console
+ISSUER_ID = "3388000000022985644"
 
-def create_generic_class():
-    """Create the DigiCard class (only run once)"""
-    url = "https://walletobjects.googleapis.com/walletobjects/v1/genericClass"
-    payload = {
-        "id": f"{ISSUER_ID}.digicardClass",
-        "issuerName": "DigiCard",
-        "reviewStatus": "UNDER_REVIEW",
-        "hexBackgroundColor": "#5856D6",
-        "cardTitle": {
-            "defaultValue": {
-                "language": "en-US",
-                "value": "DIGI"   # <-- this text will appear instead of a logo
+
+# -----------------------------------------------
+# Create ID for data classes & objects
+# -----------------------------------------------
+def generate_data_class_id():
+    return f"{ISSUER_ID}.businesscard_class_id"
+
+
+def generate_data_object_id(username):
+    return f"{ISSUER_ID}.{username.replace(' ', '_').lower()}_object"
+
+
+# -----------------------------------------------
+# Create Wallet Data Class
+# -----------------------------------------------
+def create_data_class():
+    class_id = generate_data_class_id()
+
+    data_class = {
+        "id": class_id,
+        "classTemplateInfo": {
+            "cardTemplateOverride": {
+                "cardRowTemplateInfos": [
+                    {
+                        "twoItems": {
+                            "startItem": {"firstValue": {"fields": [{"fieldPath": "cardHolderName"}]}}
+                        }
+                    },
+                    {
+                        "twoItems": {
+                            "startItem": {"firstValue": {"fields": [{"fieldPath": "company"}]}},
+                            "endItem": {"firstValue": {"fields": [{"fieldPath": "jobTitle"}]}}
+                        }
+                    }
+                ]
             }
         }
     }
-    response = authed_session.post(url, json=payload)
-    return response.json()
+
+    url = f"https://walletobjects.googleapis.com/walletobjects/v1/genericClass"
+    response = authed_session.post(url, json=data_class)
+
+    return response.status_code, response.json()
 
 
+# -----------------------------------------------
+# Create Wallet Data Object (Card)
+# -----------------------------------------------
+def create_data_object(username, email, company, job_title):
+    object_id = generate_data_object_id(username)
 
-def create_generic_object(handle: str, title: str, designation: str, company: str, link: str):
-    """Create a DigiCard object for a user"""
-    url = "https://walletobjects.googleapis.com/walletobjects/v1/genericObject"
-    object_id = f"{ISSUER_ID}.digicard-{handle}"
-    
-    # First check if object already exists
-    response = authed_session.get(f"https://walletobjects.googleapis.com/walletobjects/v1/genericObject/{object_id}")
-
-    if response.status_code == 200:
-        return response.json()
-    
-    payload = {
+    data_object = {
         "id": object_id,
-        "classId": f"3388000000022985644.3388000000022985644.digicardClass",
-        "cardTitle": {
-            "defaultValue": {"language": "en-US", "value": "DigiCard"}
-        },
-        "header": {
-            "defaultValue": {"language": "en-US", "value": title}
-        },
-        "subheader": {
-            "defaultValue": {"language": "en-US", "value": f"{designation} @ {company}"}
-        },
-        "barcode": {"type": "QR_CODE", "value": link},
-        "linksModuleData": {
-            "uris": [{"uri": link, "description": "View DigiCard"}]
-        }
+        "classId": generate_data_class_id(),
+        "cardHolderName": username,
+        "textModulesData": [
+            {"header": "Email", "body": email},
+            {"header": "Company", "body": company},
+            {"header": "Job Title", "body": job_title}
+        ]
     }
 
-    response = authed_session.post(url, json=payload)
-    return response.json()
+    url = f"https://walletobjects.googleapis.com/walletobjects/v1/genericObject"
+    response = authed_session.post(url, json=data_object)
 
-def generate_save_url(object_id: str):
-    """Generate a Save-to-Google-Wallet URL for the given object"""
-    issued_at = datetime.datetime.utcnow()
-    expires_at = issued_at + datetime.timedelta(hours=1)
+    return response.status_code, response.json()
+
+
+# -----------------------------------------------
+# Generate Save-to-Google-Wallet Link
+# -----------------------------------------------
+def generate_save_link(username, email, company, job_title):
+    object_id = generate_data_object_id(username)
 
     claims = {
-        "iss": credentials.service_account_email,
+        "iss": info["client_email"],
         "aud": "google",
         "typ": "savetowallet",
-        "iat": issued_at,
-        "exp": expires_at,
+        "iat": datetime.datetime.utcnow(),
         "payload": {
             "genericObjects": [
-                {"id": object_id}
+                {
+                    "id": object_id,
+                    "classId": generate_data_class_id(),
+                    "cardHolderName": username,
+                    "textModulesData": [
+                        {"header": "Email", "body": email},
+                        {"header": "Company", "body": company},
+                        {"header": "Job Title", "body": job_title}
+                    ]
+                }
             ]
         }
     }
 
-    signed_jwt = jwt.encode(claims, credentials.signer._key, algorithm="RS256")
-    return f"https://pay.google.com/gp/v/save/{signed_jwt}"
+    token = jwt.encode(claims, info["private_key"], algorithm="RS256")
 
-def tempCall():
-    url = f"https://walletobjects.googleapis.com/walletobjects/v1/genericClass?issuerId={ISSUER_ID}"
-    response = authed_session.get(url)
-    print(response.status_code, response.json())
-    return response.json()
+    save_url = f"https://pay.google.com/gp/v/save/{token}"
+
+    return save_url
